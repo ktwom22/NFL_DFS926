@@ -19,7 +19,7 @@
     .container { max-width: 1040px; margin: auto; }
     .control-panel { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 18px; margin-bottom: 20px; }
     .row { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
-    select, button { padding: 9px 12px; border-radius: 6px; font-size: 0.92rem; outline: none; background: #0b1120; color: #fff; border: 1px solid var(--border); }
+    select, button, input { padding: 9px 12px; border-radius: 6px; font-size: 0.92rem; outline: none; background: #0b1120; color: #fff; border: 1px solid var(--border); }
     button { background: var(--accent); color: #052e16; font-weight: 700; border: none; cursor: pointer; }
     button:hover { background: var(--accent-hover); }
     button:disabled { background: #475569; cursor: not-allowed; }
@@ -36,24 +36,19 @@
     .status { padding: 10px; border-radius: 6px; margin: 10px 0; font-size: 0.9rem; display: none; }
     .err { background: #7f1d1d; color: #fca5a5; display: block; }
     .loading { background: #1e3a8a; color: #93c5fd; display: block; }
-
-    .tooltip-container { position: relative; display: inline-flex; align-items: center; cursor: help; margin-left: 4px; }
-    .info-circle { background: #475569; color: #fff; border-radius: 50%; width: 18px; height: 18px; font-size: 11px; font-weight: bold; display: inline-flex; align-items: center; justify-content: center; }
-    .tooltip-text {
-      visibility: hidden; width: 320px; background-color: #020617; color: #e2e8f0; text-align: left;
-      border-radius: 6px; padding: 12px; position: absolute; z-index: 100; bottom: 130%; left: 50%;
-      transform: translateX(-50%); opacity: 0; transition: opacity 0.2s; border: 1px solid var(--border);
-      box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.5); font-size: 0.8rem; line-height: 1.4;
-    }
-    .tooltip-container:hover .tooltip-text { visibility: visible; opacity: 1; }
-    .tooltip-text ul { padding-left: 16px; margin: 6px 0 0 0; }
-    .tooltip-text li { margin-bottom: 4px; }
-    .stat-tag { color: var(--accent); font-weight: bold; }
+    .notice { background: #854d0e; color: #fef08a; padding: 10px; border-radius: 6px; margin-bottom: 15px; font-size: 0.88rem; }
   </style>
 </head>
 <body>
 
 <div class="container">
+  {% if error_message %}
+    <div class="notice">
+      <strong>DraftKings Lobby Notice:</strong> {{ error_message }}
+      <br><small>If the automatic slate list is blocked by DraftKings on this IP, enter any DraftGroup ID or contest URL below to fetch it directly.</small>
+    </div>
+  {% endif %}
+
   <div class="control-panel">
     <h2 style="margin: 0 0 14px 0;">DraftKings NFL Multi-Lineup Optimizer</h2>
 
@@ -61,17 +56,28 @@
       <label>
         Slate:
         <select id="slateSelect" onchange="handleSlateChange()">
-          <optgroup label="Showdown (Single Game)">
-            {% for s in slates if s.type == 'showdown' %}
-              <option value="{{ s.id }}" data-type="showdown">{{ s.label }}</option>
-            {% endfor %}
-          </optgroup>
-          <optgroup label="Classic Slates">
-            {% for s in slates if s.type == 'classic' %}
-              <option value="{{ s.id }}" data-type="classic">{{ s.label }}</option>
-            {% endfor %}
-          </optgroup>
+          {% if slates %}
+            <optgroup label="Showdown (Single Game)">
+              {% for s in slates if s.type == 'showdown' %}
+                <option value="{{ s.id }}" data-type="showdown">{{ s.label }}</option>
+              {% endfor %}
+            </optgroup>
+            <optgroup label="Classic Slates">
+              {% for s in slates if s.type == 'classic' %}
+                <option value="{{ s.id }}" data-type="classic">{{ s.label }}</option>
+              {% endfor %}
+            </optgroup>
+          {% else %}
+            <option value="" disabled selected>No slates loaded automatically</option>
+          {% endif %}
         </select>
+      </label>
+
+      <!-- Manual DraftGroup fallback input -->
+      <label>
+        Or DraftGroup ID:
+        <input type="text" id="manualDgInput" placeholder="e.g. 102430" style="width: 110px;">
+        <button type="button" onclick="loadManualSlate()" style="padding: 7px 10px; font-size: 0.82rem;">Load</button>
       </label>
 
       <!-- Contest Type Selector -->
@@ -82,17 +88,6 @@
           <option value="limited_entry">Limited Entry (3-Max / 20-Max)</option>
           <option value="single_entry">Single Entry (SE / Small-Field)</option>
         </select>
-        <span class="tooltip-container">
-          <span class="info-circle">i</span>
-          <div class="tooltip-text">
-            <strong>Contest-Driven Strategy:</strong>
-            <ul>
-              <li><span class="stat-tag">Milly Maker:</span> Exactly 1 TE enforced (strictly bans dual-TE flex). Highest variance (16%). High portfolio diversification.</li>
-              <li><span class="stat-tag">Limited Entry:</span> Exactly 1 TE enforced. Balanced ceiling (12% variance). Anchors core volume.</li>
-              <li><span class="stat-tag">Single Entry:</span> Low variance (8%). Maximizes median volume; dual-TE allowed only if optimal.</li>
-            </ul>
-          </div>
-        </span>
       </label>
 
       <!-- Showdown Script Control -->
@@ -120,17 +115,6 @@
           <option value="naked_qb">Naked QB (No Pass Catchers)</option>
           <option value="none">Unrestricted (Solver Discretion)</option>
         </select>
-        <span class="tooltip-container">
-          <span class="info-circle">i</span>
-          <div class="tooltip-text">
-            <strong>Historical DK Milly Maker Win Rates:</strong>
-            <ul>
-              <li><span class="stat-tag">Game Stack (82-85%):</span> Pair QB with pass-catcher + opponent bring-back.</li>
-              <li><span class="stat-tag">Double Stack (55-60%):</span> Dominates pocket passers (Purdy, Mahomes).</li>
-              <li><span class="stat-tag">Naked QB (&lt;10%):</span> Only viable for high-volume rushing QBs (Lamar, Allen).</li>
-            </ul>
-          </div>
-        </span>
       </label>
 
       <!-- Optional Team to Stack Dropdown -->
@@ -173,22 +157,60 @@
 
 <script>
 let currentVegas = null;
+let activeSlateId = null;
+let activeSlateType = "showdown";
+
+function updateControlVisibility(isSho) {
+  document.getElementById("scriptLabel").style.display = isSho ? "inline-block" : "none";
+  document.getElementById("allowKDstLabel").style.display = isSho ? "inline-block" : "none";
+  document.getElementById("stackLabel").style.display = isSho ? "none" : "inline-block";
+  document.getElementById("teamStackLabel").style.display = isSho ? "none" : "inline-block";
+}
 
 async function handleSlateChange() {
   const sel = document.getElementById("slateSelect");
+  if (!sel || sel.selectedIndex < 0) return;
   const opt = sel.options[sel.selectedIndex];
-  const isShowdown = opt && opt.dataset.type === "showdown";
+  if (!opt || !opt.value) return;
 
-  document.getElementById("scriptLabel").style.display = isShowdown ? "inline-block" : "none";
-  document.getElementById("allowKDstLabel").style.display = isShowdown ? "inline-block" : "none";
-  document.getElementById("stackLabel").style.display = isShowdown ? "none" : "inline-block";
-  document.getElementById("teamStackLabel").style.display = isShowdown ? "none" : "inline-block";
+  activeSlateId = parseInt(opt.value);
+  activeSlateType = opt.dataset.type || "classic";
+  updateControlVisibility(activeSlateType === "showdown");
+  await fetchVegasAndTeams(activeSlateId, activeSlateType);
+}
 
+async function loadManualSlate() {
+  const raw = document.getElementById("manualDgInput").value.trim();
+  const matched = raw.match(/\d+/);
+  if (!matched) {
+    alert("Please enter a numeric DraftGroup ID (e.g. 102430).");
+    return;
+  }
+  activeSlateId = parseInt(matched[0]);
+
+  // Prompt user whether this is showdown or classic if entering manually
+  const isShowdown = confirm("Is this DraftGroup a Showdown (Single-Game) slate? Click OK for Showdown, Cancel for Classic.");
+  activeSlateType = isShowdown ? "showdown" : "classic";
+
+  // Add to dropdown and select it
+  const sel = document.getElementById("slateSelect");
+  const newOpt = document.createElement("option");
+  newOpt.value = activeSlateId;
+  newOpt.dataset.type = activeSlateType;
+  newOpt.text = `Manual #${activeSlateId} (${activeSlateType.toUpperCase()})`;
+  newOpt.selected = true;
+  sel.appendChild(newOpt);
+
+  updateControlVisibility(activeSlateType === "showdown");
+  await fetchVegasAndTeams(activeSlateId, activeSlateType);
+}
+
+async function fetchVegasAndTeams(dgId, sType) {
   try {
     const res = await fetch("/api/vegas-info", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ draft_group_id: parseInt(opt.value) })
+      body: JSON.stringify({ draft_group_id: dgId })
     });
     const data = await res.json();
 
@@ -200,7 +222,7 @@ async function handleSlateChange() {
       });
     }
 
-    if (isShowdown && data.status === "success" && data.vegas) {
+    if (sType === "showdown" && data.status === "success" && data.vegas) {
       currentVegas = data.vegas;
       document.getElementById("vegasSpread").innerText = `Spread: ${data.vegas.favorite} -${data.vegas.spread}`;
       document.getElementById("vegasTotal").innerText = `O/U: ${data.vegas.over_under}`;
@@ -216,9 +238,10 @@ async function handleSlateChange() {
 }
 
 async function runOptimization() {
-  const sel = document.getElementById("slateSelect");
-  const opt = sel.options[sel.selectedIndex];
-  if (!opt) return;
+  if (!activeSlateId) {
+    alert("Please select or load a slate first.");
+    return;
+  }
 
   const btn = document.getElementById("solveBtn");
   const msg = document.getElementById("msg");
@@ -226,7 +249,7 @@ async function runOptimization() {
 
   btn.disabled = true;
   msg.className = "status loading";
-  msg.innerText = "Applying game-stack & contest rules...";
+  msg.innerText = "Applying optimization constraints...";
   container.innerHTML = "";
 
   try {
@@ -234,8 +257,8 @@ async function runOptimization() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        draft_group_id: parseInt(opt.value),
-        slate_type: opt.dataset.type,
+        draft_group_id: activeSlateId,
+        slate_type: activeSlateType,
         contest_type: document.getElementById("contestTypeSelect").value,
         game_script: document.getElementById("gameScriptSelect").value,
         stack_style: document.getElementById("stackStyleSelect").value,
@@ -248,30 +271,12 @@ async function runOptimization() {
       })
     });
 
-    const text = await res.text();
-    let data;
-    try {
-      data = JSON.parse(text);
-    } catch (e) {
-      throw new Error(`Server returned non-JSON response (HTTP ${res.status}): ${text.substring(0, 150)}...`);
-    }
-
+    const data = await res.json();
     if (!res.ok || data.status === "error") {
       throw new Error(data.message || "Optimization failed.");
     }
 
-    let lineupsList = [];
-    if (Array.isArray(data.lineups)) {
-      lineupsList = data.lineups;
-    } else if (Array.isArray(data.lineup)) {
-      lineupsList = [{
-        lineup_num: 1,
-        total_salary: data.total_salary,
-        total_proj: data.total_projected_fpts,
-        players: data.lineup
-      }];
-    }
-
+    const lineupsList = Array.isArray(data.lineups) ? data.lineups : [];
     if (lineupsList.length === 0) {
       throw new Error("No lineups were generated.");
     }
