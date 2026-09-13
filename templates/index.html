@@ -48,7 +48,7 @@
       <label>
         Slate:
         <select id="slateSelect" onchange="handleSlateChange()">
-          <option value="" disabled selected>Loading live DraftKings slates...</option>
+          <option value="" disabled selected>Loading upcoming DraftKings slates...</option>
         </select>
       </label>
 
@@ -152,73 +152,98 @@ function parseDkDate(dateVal) {
   return "";
 }
 
-// Client-side automatic slate loader (uses visitor's residential connection, bypassing Railway IP bans)
+async function fetchWithFallback() {
+  const target = "https://www.draftkings.com/lobby/getcontests?sport=NFL";
+
+  // Strategy 1: Direct Browser Fetch (Zero latency)
+  try {
+    const res = await fetch(target, { cache: "no-store" });
+    if (res.ok) {
+      const json = await res.json();
+      if (json && (json.Contests || json.contests)) return json;
+    }
+  } catch (err) {
+    console.warn("Direct fetch restricted by CORS. Cascading to proxy...");
+  }
+
+  // Strategy 2: CorsProxy.io (Fast, direct un-enveloped JSON)
+  try {
+    const res = await fetch("https://corsproxy.io/?" + encodeURIComponent(target), { cache: "no-store" });
+    if (res.ok) {
+      const json = await res.json();
+      if (json && (json.Contests || json.contests)) return json;
+    }
+  } catch (err) {
+    console.warn("CorsProxy.io attempt failed. Trying AllOrigins fallback...");
+  }
+
+  // Strategy 3: AllOrigins with proper wrapper parsing
+  try {
+    const res = await fetch("https://api.allorigins.win/get?url=" + encodeURIComponent(target) + "&timestamp=" + Date.now());
+    if (res.ok) {
+      const wrapper = await res.json();
+      if (wrapper && wrapper.contents) {
+        const parsed = JSON.parse(wrapper.contents);
+        if (parsed && (parsed.Contests || parsed.contests)) return parsed;
+      }
+    }
+  } catch (err) {
+    console.error("AllOrigins parsing failed:", err);
+  }
+
+  return null;
+}
+
 async function autoLoadDraftKingsSlates() {
   const sel = document.getElementById("slateSelect");
-  let data = null;
+  const data = await fetchWithFallback();
 
-  // Try direct browser fetch first
-  try {
-    const res = await fetch("https://www.draftkings.com/lobby/getcontests?sport=NFL", {
-      headers: { "Accept": "application/json" }
-    });
-    if (res.ok) data = await res.json();
-  } catch(e) {
-    console.log("Direct browser fetch blocked by CORS; trying fallback proxy...");
-  }
-
-  // If browser CORS policy blocked direct fetch, route through allorigins proxy
-  if (!data) {
-    try {
-      const proxyRes = await fetch("https://api.allorigins.win/raw?url=" + encodeURIComponent("https://www.draftkings.com/lobby/getcontests?sport=NFL"));
-      if (proxyRes.ok) data = await proxyRes.json();
-    } catch(e) {
-      console.error("Proxy fetch error:", e);
-    }
-  }
-
-  if (!data || !data.Contests) {
-    sel.innerHTML = '<option value="" disabled selected>Unable to auto-load slates</option>';
+  if (!data || (!data.Contests && !data.contests)) {
+    sel.innerHTML = '<option value="" disabled selected>Unable to load slates. Please reload page.</option>';
     return;
   }
 
-  const contests = data.Contests || [];
+  const contests = data.Contests || data.contests || [];
   const draftGroups = {};
-  (data.DraftGroups || []).forEach(dg => { draftGroups[dg.DraftGroupId] = dg; });
+  (data.DraftGroups || data.draftGroups || []).forEach(dg => {
+    const id = dg.DraftGroupId || dg.draftGroupId;
+    if (id) draftGroups[id] = dg;
+  });
 
   const slates = [];
   const seenDgIds = new Set();
 
   contests.forEach(c => {
-    const dgId = c.dg;
+    const dgId = c.dg || c.draftGroupId;
     if (!dgId || seenDgIds.has(dgId)) return;
 
-    const nameLower = (c.n || "").toLowerCase();
+    const nameLower = (c.n || c.name || "").toLowerCase();
     if (["2nd half", "4th quarter", "2h", "4q", "snake", "tier", "single stat", "flash"].some(u => nameLower.includes(u))) {
       return;
     }
 
     const dgInfo = draftGroups[dgId] || {};
-    const gameCount = dgInfo.GameCount || 0;
-    const isShowdown = (c.gameType === 96) || nameLower.includes("showdown") || (gameCount === 1);
+    const gameCount = dgInfo.GameCount || dgInfo.gameCount || 0;
+    const isShowdown = (c.gameType === 96 || c.gameTypeId === 96) || nameLower.includes("showdown") || (gameCount === 1);
     const slateType = isShowdown ? "showdown" : "classic";
 
-    const rawDate = c.sd || dgInfo.StartDateEst || dgInfo.StartDate;
+    const rawDate = c.sd || c.startDate || dgInfo.StartDateEst || dgInfo.StartDate;
     const formattedDate = parseDkDate(rawDate);
     const dateStr = formattedDate ? ` - ${formattedDate}` : "";
 
     let label = "";
-    const matchupMatch = (c.n || "").match(/([A-Za-z0-9]{2,3}\s*(?:@|vs\.?)\s*[A-Za-z0-9]{2,3})/i);
+    const rawTitle = c.n || c.name || "";
+    const matchupMatch = rawTitle.match(/([A-Za-z0-9]{2,3}\s*(?:@|vs\.?)\s*[A-Za-z0-9]{2,3})/i);
 
     if (isShowdown) {
       if (matchupMatch) {
         label = `Showdown: ${matchupMatch[1].toUpperCase().replace("VS.", "@").replace("VS", "@")}${dateStr}`;
       } else {
-        const cleanTitle = (c.n || "").replace(/NFL\s*(Showdown)?\s*(\$[\d,KM]+)?/ig, "").trim();
+        const cleanTitle = rawTitle.replace(/NFL\s*(Showdown)?\s*(\$[\d,KM]+)?/ig, "").trim();
         label = `Showdown: ${cleanTitle || 'Single Game'}${dateStr}`;
       }
     } else {
-      const tag = dgInfo.DraftGroupTag || "Classic Slate";
+      const tag = dgInfo.DraftGroupTag || dgInfo.draftGroupTag || "Classic Slate";
       const countStr = gameCount ? ` (${gameCount} Games)` : "";
       label = `${tag}: ${formattedDate}${countStr}`.trim();
     }
