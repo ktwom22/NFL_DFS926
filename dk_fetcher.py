@@ -3,21 +3,14 @@ from datetime import datetime
 import pandas as pd
 import requests
 
+# Clean, authentic browser headers (WITHOUT Origin or Sec-Fetch flags that trigger CORS blocks)
 DK_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/128.0.0.0 Safari/537.36"
+        "Chrome/124.0.0.0 Safari/537.36"
     ),
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "en-US,en;q=0.9",
-    "Origin": "https://www.draftkings.com",
-    "Referer": "https://www.draftkings.com/",
-    "Sec-Ch-Ua": '"Chromium";v="128", "Not;A=Brand";v="24", "Google Chrome";v="128"',
-    "Sec-Ch-Ua-Mobile": "?0",
-    "Sec-Ch-Ua-Platform": '"Windows"',
-    "Sec-Fetch-Dest": "empty",
-    "Sec-Fetch-Mode": "cors",
-    "Sec-Fetch-Site": "same-site",
 }
 
 
@@ -141,15 +134,12 @@ def get_vegas_game_data(team_a: str, team_b: str) -> dict:
 
 
 def get_all_upcoming_nfl_slates():
-  session = requests.Session()
-  session.headers.update(DK_HEADERS)
-
   url = "https://www.draftkings.com/lobby/getcontests?sport=NFL"
-  res = session.get(url, timeout=12)
+  res = requests.get(url, headers=DK_HEADERS, timeout=12)
 
   if res.status_code != 200:
     raise ConnectionError(
-        f"DraftKings Lobby returned HTTP {res.status_code}."
+        f"DraftKings Lobby returned HTTP {res.status_code}"
     )
 
   data = res.json()
@@ -264,10 +254,7 @@ def _extract_fppg(draftable: dict) -> float:
 
 def get_slate_players(draft_group_id: int):
   url = f"https://api.draftkings.com/draftgroups/v1/draftgroups/{draft_group_id}/draftables?format=json"
-  session = requests.Session()
-  session.headers.update(DK_HEADERS)
-
-  res = session.get(url, timeout=12)
+  res = requests.get(url, headers=DK_HEADERS, timeout=12)
   if res.status_code != 200:
     raise ConnectionError(
         f"DraftKings API returned HTTP {res.status_code} for DraftGroup"
@@ -307,7 +294,7 @@ def get_slate_players(draft_group_id: int):
     if not p_id:
       continue
 
-    # 1. Systemic Status Filter: Drop injured, out, disabled, suspended, or practice squad players
+    # 1. Status Filter: drop injured / inactive / practice squad designations
     status = str(d.get("status", "")).strip().upper()
     if status in ["O", "IR", "OUT", "PUP", "SUS", "D", "INACTIVE", "NA"]:
       continue
@@ -335,21 +322,20 @@ def get_slate_players(draft_group_id: int):
           pos = "DST"
           break
 
-    # 2. Starting QB Threshold: Filter backups priced under starter cutoffs
+    # 2. Starting QB Filter
     if pos == "QB":
       if is_showdown and salary < 7500:
         continue
       elif not is_showdown and salary < 4800:
         continue
 
-    # 3. Systemic Projection & Participation Filter
+    # 3. Systemic Projection Filter:
+    # Drops non-active players with 0 snaps/points (eliminates dummy practice-squad baseline)
     avg_fpts = _extract_fppg(d)
-    # Skip any skill/defense player who has zero historical participation
     if avg_fpts <= 0.0:
       continue
 
-    # Generic filter for inactive depth players:
-    # On Classic slates, non-DST players priced at bare minimum ($3,000) with sub-2.0 FPPG are inactive depth
+    # Minimum salary depth filter on Classic slates (drops inactive minimum players who don't touch the ball)
     if not is_showdown and pos != "DST" and salary <= 3000 and avg_fpts < 2.0:
       continue
 
