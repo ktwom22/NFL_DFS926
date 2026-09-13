@@ -1,6 +1,6 @@
 import os
 import traceback
-from dk_fetcher import get_all_upcoming_nfl_slates, get_slate_players, get_vegas_game_data
+from dk_fetcher import get_slate_players, get_vegas_game_data
 from flask import Flask, jsonify, render_template, request
 from optimizer import DraftKingsOptimizer
 
@@ -9,13 +9,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-  slates = []
-  try:
-    slates = get_all_upcoming_nfl_slates()
-  except Exception as e:
-    print(f"[Slate Fetch Error] {e}")
-
-  return render_template("index.html", slates=slates)
+  return render_template("index.html")
 
 
 @app.route("/api/vegas-info", methods=["POST"])
