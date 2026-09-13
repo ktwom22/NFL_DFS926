@@ -134,93 +134,79 @@ def get_vegas_game_data(team_a: str, team_b: str) -> dict:
 
 
 def get_all_upcoming_nfl_slates():
-  url = "https://www.draftkings.com/lobby/getcontests?sport=NFL"
-  res = requests.get(url, headers=DK_HEADERS, timeout=12)
+    """
+    Fetches slates via DraftKings API.
+    Tries the mobile/contests feed first (cloud-friendly), then falls back to lobby feed.
+    """
+    # 1. Native API endpoint (bypasses www.draftkings.com web bot shields)
+    api_url = "https://api.draftkings.com/contests/v1/contests?sport=NFL"
+    web_url = "https://www.draftkings.com/lobby/getcontests?sport=NFL"
 
-  if res.status_code != 200:
-    raise ConnectionError(
-        f"DraftKings Lobby returned HTTP {res.status_code}"
-    )
-
-  data = res.json()
-  contests = data.get("Contests", [])
-  draft_groups = {
-      dg.get("DraftGroupId"): dg for dg in data.get("DraftGroups", [])
-  }
-
-  slates = []
-  seen_dg_ids = set()
-
-  for c in contests:
-    dg_id = c.get("dg")
-    if not dg_id or dg_id in seen_dg_ids:
-      continue
-
-    c_name = c.get("n", "")
-    name_lower = c_name.lower()
-
-    if any(
-        unsupported in name_lower
-        for unsupported in [
-            "2nd half",
-            "4th quarter",
-            "2h",
-            "4q",
-            "snake",
-            "tier",
-            "single stat",
-            "flash",
-        ]
-    ):
-      continue
-
-    game_type_id = c.get("gameType")
-    dg_info = draft_groups.get(dg_id, {})
-    game_count = dg_info.get("GameCount", 0)
-
-    is_showdown = (
-        (game_type_id == 96) or ("showdown" in name_lower) or (game_count == 1)
-    )
-    slate_type = "showdown" if is_showdown else "classic"
-
-    raw_date = (
-        c.get("sd") or dg_info.get("StartDateEst") or dg_info.get("StartDate")
-    )
-    formatted_date = _parse_dk_date(raw_date)
-    date_str = f" - {formatted_date}" if formatted_date else ""
-
-    matchup_search = re.search(
-        r"([A-Za-z0-9]{2,3}\s*(?:@|vs\.?)\s*[A-Za-z0-9]{2,3})",
-        c_name,
-        re.IGNORECASE,
-    )
-
-    if is_showdown:
-      if matchup_search:
-        matchup = (
-            matchup_search.group(1)
-            .upper()
-            .replace("VS.", "@")
-            .replace("VS", "@")
-        )
-        label = f"Showdown: {matchup}{date_str}"
-      else:
-        clean_title = re.sub(
-            r"NFL\s*(Showdown)?\s*(\$[\d,KM]+)?",
-            "",
-            c_name,
-            flags=re.IGNORECASE,
-        ).strip(" -[]()")
-        label = f"Showdown: {clean_title or 'Single Game'}{date_str}"
+    data = None
+    res = requests.get(api_url, headers=DK_HEADERS, timeout=8)
+    if res.status_code == 200:
+        data = res.json()
     else:
-      tag = dg_info.get("DraftGroupTag") or "Classic Slate"
-      count_str = f" ({game_count} Games)" if game_count else ""
-      label = f"{tag}: {formatted_date}{count_str}".strip(" :")
+        # Fallback to web lobby
+        res = requests.get(web_url, headers=DK_HEADERS, timeout=8)
+        if res.status_code == 200:
+            data = res.json()
+        else:
+            raise ConnectionError(f"DraftKings returned HTTP {res.status_code}")
 
-    seen_dg_ids.add(dg_id)
-    slates.append({"id": int(dg_id), "label": label, "type": slate_type})
+    contests = data.get("Contests", []) or data.get("contests", [])
+    raw_dg = data.get("DraftGroups", []) or data.get("draftGroups", [])
+    draft_groups = {dg.get("DraftGroupId") or dg.get("draftGroupId"): dg for dg in raw_dg}
 
-  return sorted(slates, key=lambda x: (x["type"] != "showdown", x["label"]))
+    slates = []
+    seen_dg_ids = set()
+
+    for c in contests:
+        dg_id = c.get("dg") or c.get("draftGroupId")
+        if not dg_id or dg_id in seen_dg_ids:
+            continue
+
+        c_name = c.get("n") or c.get("name") or ""
+        name_lower = c_name.lower()
+
+        if any(unsupported in name_lower for unsupported in [
+            "2nd half", "4th quarter", "2h", "4q", "snake", "tier", "single stat", "flash"
+        ]):
+            continue
+
+        game_type_id = c.get("gameType") or c.get("gameTypeId")
+        dg_info = draft_groups.get(dg_id, {})
+        game_count = dg_info.get("GameCount") or dg_info.get("gameCount", 0)
+
+        is_showdown = (game_type_id == 96) or ("showdown" in name_lower) or (game_count == 1)
+        slate_type = "showdown" if is_showdown else "classic"
+
+        raw_date = c.get("sd") or c.get("startDate") or dg_info.get("StartDateEst") or dg_info.get("StartDate")
+        formatted_date = _parse_dk_date(raw_date)
+        date_str = f" - {formatted_date}" if formatted_date else ""
+
+        matchup_search = re.search(r"([A-Za-z0-9]{2,3}\s*(?:@|vs\.?)\s*[A-Za-z0-9]{2,3})", c_name, re.IGNORECASE)
+
+        if is_showdown:
+            if matchup_search:
+                matchup = matchup_search.group(1).upper().replace("VS.", "@").replace("VS", "@")
+                label = f"Showdown: {matchup}{date_str}"
+            else:
+                clean_title = re.sub(r"NFL\s*(Showdown)?\s*(\$[\d,KM]+)?", "", c_name, flags=re.IGNORECASE).strip(" -[]()")
+                label = f"Showdown: {clean_title or 'Single Game'}{date_str}"
+        else:
+            tag = dg_info.get("DraftGroupTag") or dg_info.get("draftGroupTag") or "Classic Slate"
+            count_str = f" ({game_count} Games)" if game_count else ""
+            label = f"{tag}: {formatted_date}{count_str}".strip(" :")
+
+        seen_dg_ids.add(dg_id)
+        slates.append({
+            "id": int(dg_id),
+            "label": label,
+            "type": slate_type
+        })
+
+    return sorted(slates, key=lambda x: (x["type"] != "showdown", x["label"]))
 
 
 def _extract_fppg(draftable: dict) -> float:
