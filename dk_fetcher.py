@@ -135,7 +135,7 @@ def get_vegas_game_data(team_a: str, team_b: str) -> dict:
         }
 
   except Exception as err:
-    print(f"[Vegas Fetcher] ESPN scoreboard fallback used: {err}")
+    print(f"[Vegas Fetcher] Fallback used: {err}")
 
   return default_data
 
@@ -149,7 +149,7 @@ def get_all_upcoming_nfl_slates():
 
   if res.status_code != 200:
     raise ConnectionError(
-        f"DraftKings Lobby returned HTTP {res.status_code}. (Body: {res.text[:120]})"
+        f"DraftKings Lobby returned HTTP {res.status_code}."
     )
 
   data = res.json()
@@ -307,8 +307,11 @@ def get_slate_players(draft_group_id: int):
     if not p_id:
       continue
 
+    # 1. Systemic Status Filter: Drop injured, out, disabled, suspended, or practice squad players
     status = str(d.get("status", "")).strip().upper()
-    if status in ["O", "IR", "OUT", "PUP", "SUS", "D"]:
+    if status in ["O", "IR", "OUT", "PUP", "SUS", "D", "INACTIVE", "NA"]:
+      continue
+    if d.get("isDisabled", False) or d.get("isSuspended", False):
       continue
 
     salary = int(d.get("salary") or 0)
@@ -332,11 +335,23 @@ def get_slate_players(draft_group_id: int):
           pos = "DST"
           break
 
+    # 2. Starting QB Threshold: Filter backups priced under starter cutoffs
     if pos == "QB":
       if is_showdown and salary < 7500:
         continue
       elif not is_showdown and salary < 4800:
         continue
+
+    # 3. Systemic Projection & Participation Filter
+    avg_fpts = _extract_fppg(d)
+    # Skip any skill/defense player who has zero historical participation
+    if avg_fpts <= 0.0:
+      continue
+
+    # Generic filter for inactive depth players:
+    # On Classic slates, non-DST players priced at bare minimum ($3,000) with sub-2.0 FPPG are inactive depth
+    if not is_showdown and pos != "DST" and salary <= 3000 and avg_fpts < 2.0:
+      continue
 
     team_abbr = str(d.get("teamAbbreviation", "UNK")).upper().strip()
     opp_abbr = matchup_map.get(team_abbr, "UNK")
@@ -345,10 +360,6 @@ def get_slate_players(draft_group_id: int):
       if salary < players_by_id[p_id]["salary"]:
         players_by_id[p_id]["salary"] = salary
       continue
-
-    avg_fpts = _extract_fppg(d)
-    if avg_fpts <= 0.0:
-      avg_fpts = 1.0
 
     players_by_id[p_id] = {
         "id": p_id,

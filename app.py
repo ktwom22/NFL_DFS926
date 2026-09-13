@@ -7,28 +7,14 @@ from optimizer import DraftKingsOptimizer
 app = Flask(__name__)
 
 
-@app.errorhandler(Exception)
-def handle_exception(e):
-  traceback.print_exc()
-  return (
-      jsonify({"status": "error", "message": f"Server Error: {str(e)}"}),
-      500,
-  )
-
-
 @app.route("/")
 def home():
-  slates = []
-  error_message = None
   try:
     slates = get_all_upcoming_nfl_slates()
   except Exception as e:
-    error_message = str(e)
-    print(f"[Slate Fetch Error] {e}")
-
-  return render_template(
-      "index.html", slates=slates, error_message=error_message
-  )
+    print(f"Error loading slates: {e}")
+    slates = []
+  return render_template("index.html", slates=slates)
 
 
 @app.route("/api/vegas-info", methods=["POST"])
@@ -36,23 +22,12 @@ def vegas_info():
   data = request.get_json() or {}
   draft_group_id = data.get("draft_group_id")
 
-  if not draft_group_id:
-    return (
-        jsonify(
-            {"status": "error", "message": "No DraftGroup ID was provided."}
-        ),
-        400,
-    )
-
   player_df = get_slate_players(draft_group_id)
   if player_df.empty:
     return (
-        jsonify({
-            "status": "error",
-            "message": (
-                f"No draftable players found for DraftGroup #{draft_group_id}."
-            ),
-        }),
+        jsonify(
+            {"status": "error", "message": "Slate player data unavailable."}
+        ),
         404,
     )
 
@@ -88,76 +63,76 @@ def optimize():
   underdog_team = data.get("underdog_team")
   n_lineups = int(data.get("n_lineups", 10))
 
-  player_df = get_slate_players(draft_group_id)
-  if player_df.empty:
-    return (
-        jsonify({
-            "status": "error",
-            "message": (
-                f"Player pool for DraftGroup #{draft_group_id} is empty."
-            ),
-        }),
-        404,
-    )
+  try:
+    player_df = get_slate_players(draft_group_id)
+    if player_df.empty:
+      return (
+          jsonify({"status": "error", "message": "Player pool is empty."}),
+          404,
+      )
 
-  teams = list(set(player_df["team"].dropna()))
-  teams = [t for t in teams if t != "UNK"]
+    teams = list(set(player_df["team"].dropna()))
+    teams = [t for t in teams if t != "UNK"]
 
-  if game_script == "auto" and len(teams) >= 2:
-    vegas = get_vegas_game_data(teams[0], teams[1])
-    game_script = vegas["recommended_script"]
-    favorite_team = vegas["favorite"]
-    underdog_team = vegas["underdog"]
+    if game_script == "auto" and len(teams) >= 2:
+      vegas = get_vegas_game_data(teams[0], teams[1])
+      game_script = vegas["recommended_script"]
+      favorite_team = vegas["favorite"]
+      underdog_team = vegas["underdog"]
 
-  opt = DraftKingsOptimizer(player_df, use_boom_engine=use_boom_engine)
+    opt = DraftKingsOptimizer(player_df, use_boom_engine=use_boom_engine)
 
-  if slate_type == "showdown":
-    lineups = opt.optimize_showdown_multi(
-        n_lineups=n_lineups,
-        max_overlap=4,
-        game_script=game_script,
-        contest_type=contest_type,
-        favorite_team=favorite_team,
-        underdog_team=underdog_team,
-        allow_k_dst=data.get("allow_k_dst", True),
-    )
-    executed_script = f"{game_script} ({contest_type.replace('_', ' ')})"
-  else:
-    lineups = opt.optimize_classic_multi(
-        n_lineups=n_lineups,
-        contest_type=contest_type,
-        stack_style=stack_style,
-        primary_stack_team=primary_stack_team,
-    )
-    team_tag = (
-        f" | {primary_stack_team}"
-        if primary_stack_team and primary_stack_team != "ANY"
-        else ""
-    )
-    executed_script = (
-        f"{stack_style}{team_tag} ({contest_type.replace('_', ' ')})"
-    )
+    if slate_type == "showdown":
+      lineups = opt.optimize_showdown_multi(
+          n_lineups=n_lineups,
+          max_overlap=4,
+          game_script=game_script,
+          contest_type=contest_type,
+          favorite_team=favorite_team,
+          underdog_team=underdog_team,
+          allow_k_dst=data.get("allow_k_dst", True),
+      )
+      executed_script = f"{game_script} ({contest_type.replace('_', ' ')})"
+    else:
+      lineups = opt.optimize_classic_multi(
+          n_lineups=n_lineups,
+          contest_type=contest_type,
+          stack_style=stack_style,
+          primary_stack_team=primary_stack_team,
+      )
+      team_tag = (
+          f" | {primary_stack_team}"
+          if primary_stack_team and primary_stack_team != "ANY"
+          else ""
+      )
+      executed_script = (
+          f"{stack_style}{team_tag} ({contest_type.replace('_', ' ')})"
+      )
 
-  if not lineups:
-    return (
-        jsonify({
-            "status": "error",
-            "message": (
-                f"Could not find any viable lineups for '{executed_script}'."
-            ),
-        }),
-        400,
-    )
+    if not lineups:
+      return (
+          jsonify({
+              "status": "error",
+              "message": (
+                  f"Could not find any viable lineups for '{executed_script}'."
+              ),
+          }),
+          400,
+      )
 
-  return jsonify({
-      "status": "success",
-      "executed_script": executed_script,
-      "count": len(lineups),
-      "lineups": lineups,
-      "lineup": lineups[0]["players"],
-      "total_salary": lineups[0]["total_salary"],
-      "total_projected_fpts": lineups[0]["total_proj"],
-  })
+    return jsonify({
+        "status": "success",
+        "executed_script": executed_script,
+        "count": len(lineups),
+        "lineups": lineups,
+        "lineup": lineups[0]["players"],
+        "total_salary": lineups[0]["total_salary"],
+        "total_projected_fpts": lineups[0]["total_proj"],
+    })
+
+  except Exception as err:
+    traceback.print_exc()
+    return jsonify({"status": "error", "message": str(err)}), 400
 
 
 if __name__ == "__main__":
