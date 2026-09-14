@@ -3,7 +3,6 @@ from datetime import datetime
 import pandas as pd
 import requests
 
-# Clean, authentic browser headers (WITHOUT Origin or Sec-Fetch flags that trigger CORS blocks)
 DK_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -133,82 +132,6 @@ def get_vegas_game_data(team_a: str, team_b: str) -> dict:
   return default_data
 
 
-def get_all_upcoming_nfl_slates():
-    """
-    Fetches slates via DraftKings API.
-    Tries the mobile/contests feed first (cloud-friendly), then falls back to lobby feed.
-    """
-    # 1. Native API endpoint (bypasses www.draftkings.com web bot shields)
-    api_url = "https://api.draftkings.com/contests/v1/contests?sport=NFL"
-    web_url = "https://www.draftkings.com/lobby/getcontests?sport=NFL"
-
-    data = None
-    res = requests.get(api_url, headers=DK_HEADERS, timeout=8)
-    if res.status_code == 200:
-        data = res.json()
-    else:
-        # Fallback to web lobby
-        res = requests.get(web_url, headers=DK_HEADERS, timeout=8)
-        if res.status_code == 200:
-            data = res.json()
-        else:
-            raise ConnectionError(f"DraftKings returned HTTP {res.status_code}")
-
-    contests = data.get("Contests", []) or data.get("contests", [])
-    raw_dg = data.get("DraftGroups", []) or data.get("draftGroups", [])
-    draft_groups = {dg.get("DraftGroupId") or dg.get("draftGroupId"): dg for dg in raw_dg}
-
-    slates = []
-    seen_dg_ids = set()
-
-    for c in contests:
-        dg_id = c.get("dg") or c.get("draftGroupId")
-        if not dg_id or dg_id in seen_dg_ids:
-            continue
-
-        c_name = c.get("n") or c.get("name") or ""
-        name_lower = c_name.lower()
-
-        if any(unsupported in name_lower for unsupported in [
-            "2nd half", "4th quarter", "2h", "4q", "snake", "tier", "single stat", "flash"
-        ]):
-            continue
-
-        game_type_id = c.get("gameType") or c.get("gameTypeId")
-        dg_info = draft_groups.get(dg_id, {})
-        game_count = dg_info.get("GameCount") or dg_info.get("gameCount", 0)
-
-        is_showdown = (game_type_id == 96) or ("showdown" in name_lower) or (game_count == 1)
-        slate_type = "showdown" if is_showdown else "classic"
-
-        raw_date = c.get("sd") or c.get("startDate") or dg_info.get("StartDateEst") or dg_info.get("StartDate")
-        formatted_date = _parse_dk_date(raw_date)
-        date_str = f" - {formatted_date}" if formatted_date else ""
-
-        matchup_search = re.search(r"([A-Za-z0-9]{2,3}\s*(?:@|vs\.?)\s*[A-Za-z0-9]{2,3})", c_name, re.IGNORECASE)
-
-        if is_showdown:
-            if matchup_search:
-                matchup = matchup_search.group(1).upper().replace("VS.", "@").replace("VS", "@")
-                label = f"Showdown: {matchup}{date_str}"
-            else:
-                clean_title = re.sub(r"NFL\s*(Showdown)?\s*(\$[\d,KM]+)?", "", c_name, flags=re.IGNORECASE).strip(" -[]()")
-                label = f"Showdown: {clean_title or 'Single Game'}{date_str}"
-        else:
-            tag = dg_info.get("DraftGroupTag") or dg_info.get("draftGroupTag") or "Classic Slate"
-            count_str = f" ({game_count} Games)" if game_count else ""
-            label = f"{tag}: {formatted_date}{count_str}".strip(" :")
-
-        seen_dg_ids.add(dg_id)
-        slates.append({
-            "id": int(dg_id),
-            "label": label,
-            "type": slate_type
-        })
-
-    return sorted(slates, key=lambda x: (x["type"] != "showdown", x["label"]))
-
-
 def _extract_fppg(draftable: dict) -> float:
   stats = draftable.get("draftStatAttributes", [])
   if not stats:
@@ -280,7 +203,6 @@ def get_slate_players(draft_group_id: int):
     if not p_id:
       continue
 
-    # 1. Status Filter: drop injured / inactive / practice squad designations
     status = str(d.get("status", "")).strip().upper()
     if status in ["O", "IR", "OUT", "PUP", "SUS", "D", "INACTIVE", "NA"]:
       continue
@@ -308,26 +230,18 @@ def get_slate_players(draft_group_id: int):
           pos = "DST"
           break
 
-    # 2. Starting QB Filter
-    if pos == "QB":
-      if is_showdown and salary < 7500:
-        continue
-      elif not is_showdown and salary < 4800:
-        continue
-
-    # 3. Systemic Projection Filter:
-    # Drops non-active players with 0 snaps/points (eliminates dummy practice-squad baseline)
     avg_fpts = _extract_fppg(d)
     if avg_fpts <= 0.0:
       continue
 
-    # Minimum salary depth filter on Classic slates (drops inactive minimum players who don't touch the ball)
+    # Filter out inactive depth on Classic slates
     if not is_showdown and pos != "DST" and salary <= 3000 and avg_fpts < 2.0:
       continue
 
     team_abbr = str(d.get("teamAbbreviation", "UNK")).upper().strip()
     opp_abbr = matchup_map.get(team_abbr, "UNK")
 
+    # Record the true base/FLEX salary (lowest across CPT/FLEX records)
     if p_id in players_by_id:
       if salary < players_by_id[p_id]["salary"]:
         players_by_id[p_id]["salary"] = salary
@@ -347,4 +261,25 @@ def get_slate_players(draft_group_id: int):
         "projected_points": avg_fpts,
     }
 
-  return pd.DataFrame(list(players_by_id.values()))
+  player_list = list(players_by_id.values())
+
+  # SYSTEMIC STARTING QB RULE:
+  # On Showdown slates, retain ONLY the highest-priced QB per team.
+  # Backups (e.g., Winston at $6k behind Dart at $9.6k) are eliminated completely.
+  if is_showdown:
+    qbs_by_team = {}
+    for p in player_list:
+      if p["position"] == "QB" and p["team"] != "UNK":
+        qbs_by_team.setdefault(p["team"], []).append(p)
+
+    backup_qb_ids = set()
+    for team, team_qbs in qbs_by_team.items():
+      if len(team_qbs) > 1:
+        # Sort descending by base salary; keep only the top starter
+        sorted_qbs = sorted(team_qbs, key=lambda x: x["salary"], reverse=True)
+        for backup in sorted_qbs[1:]:
+          backup_qb_ids.add(backup["id"])
+
+    player_list = [p for p in player_list if p["id"] not in backup_qb_ids]
+
+  return pd.DataFrame(player_list)

@@ -22,7 +22,6 @@ class DraftKingsOptimizer:
     self.df["pulp_id"] = self.df["id"].apply(_clean_id)
     self.df["user_boost"] = 1.0
 
-    # Apply Opportunity Ceiling Curve based on DraftKings Salary
     self.df["opportunity_ceiling"] = self.df.apply(
         self._calculate_opportunity_ceiling, axis=1
     )
@@ -130,6 +129,12 @@ class DraftKingsOptimizer:
       if p["adjusted_points"] < min_proj_floor:
         prob += cpt[p["pulp_id"]] + flex[p["pulp_id"]] == 0
 
+      # HARD RULE: A quarterback CANNOT be Captain unless their base FLEX salary is >= $8,500
+      # (This completely stops backup QBs priced at $6,000 FLEX from ever becoming Captain at $9,000)
+      if p["position"] == "QB" and p["salary"] < 8500:
+        prob += cpt[p["pulp_id"]] == 0
+        prob += flex[p["pulp_id"]] == 0
+
     teams = list(
         set(p["team"] for p in players if p.get("team") and p["team"] != "UNK")
     )
@@ -156,12 +161,17 @@ class DraftKingsOptimizer:
           p for p in players if p["team"] == t and p["position"] == "QB"
       ]
       if len(team_qbs) > 1:
+        # Only allow at most 1 QB per team
         prob += (
             pulp.lpSum(
                 cpt[p["pulp_id"]] + flex[p["pulp_id"]] for p in team_qbs
             )
             <= 1
         )
+        # If there are multiple QBs, lock out the cheaper backup(s) entirely
+        sorted_team_qbs = sorted(team_qbs, key=lambda x: x["salary"])
+        for backup_qb in sorted_team_qbs[:-1]:
+          prob += cpt[backup_qb["pulp_id"]] + flex[backup_qb["pulp_id"]] == 0
 
       team_tes = [
           p for p in players if p["team"] == t and p["position"] == "TE"
@@ -221,19 +231,26 @@ class DraftKingsOptimizer:
     )
 
     if game_script == "shootout":
-      qbs = [p for p in players if p["position"] == "QB"]
-      if qbs:
+      # Starters only: QBs with salary >= 8500
+      starter_qbs = [
+          p for p in players if p["position"] == "QB" and p["salary"] >= 8500
+      ]
+      if starter_qbs:
         prob += (
-            pulp.lpSum(cpt[p["pulp_id"]] + flex[p["pulp_id"]] for p in qbs)
+            pulp.lpSum(
+                cpt[p["pulp_id"]] + flex[p["pulp_id"]] for p in starter_qbs
+            )
             >= 1
         )
         prob += (
-            pulp.lpSum(cpt[p["pulp_id"]] + flex[p["pulp_id"]] for p in qbs)
+            pulp.lpSum(
+                cpt[p["pulp_id"]] + flex[p["pulp_id"]] for p in starter_qbs
+            )
             <= 2
         )
       for p in [p for p in players if p["position"] in ["K", "DST"]]:
         prob += cpt[p["pulp_id"]] + flex[p["pulp_id"]] == 0
-      for qb in qbs:
+      for qb in starter_qbs:
         team_wrs = [
             p
             for p in players
@@ -246,6 +263,19 @@ class DraftKingsOptimizer:
       for p in players:
         if p["salary"] < 6000:
           prob += cpt[p["pulp_id"]] == 0
+
+      # Prevent same-team backfield cannibalization in shootouts
+      for t in teams:
+        team_rbs = [
+            p for p in players if p["team"] == t and p["position"] == "RB"
+        ]
+        if len(team_rbs) > 1:
+          prob += (
+              pulp.lpSum(
+                  cpt[p["pulp_id"]] + flex[p["pulp_id"]] for p in team_rbs
+              )
+              <= 1
+          )
 
     elif game_script == "5_1_onslaught" and fav and und:
       prob += (
@@ -273,10 +303,15 @@ class DraftKingsOptimizer:
           prob += cpt[p["pulp_id"]] == 0
 
     elif game_script == "defensive_slugfest":
-      qbs = [p for p in players if p["position"] == "QB"]
+      starter_qbs = [
+          p for p in players if p["position"] == "QB" and p["salary"] >= 8500
+      ]
       k_dst = [p for p in players if p["position"] in ["K", "DST"]]
       prob += (
-          pulp.lpSum(cpt[p["pulp_id"]] + flex[p["pulp_id"]] for p in qbs) <= 1
+          pulp.lpSum(
+              cpt[p["pulp_id"]] + flex[p["pulp_id"]] for p in starter_qbs
+          )
+          <= 1
       )
       prob += (
           pulp.lpSum(cpt[p["pulp_id"]] + flex[p["pulp_id"]] for p in k_dst)
@@ -291,7 +326,9 @@ class DraftKingsOptimizer:
           p for p in players if p["team"] == und and p["position"] == "WR"
       ]
       und_qbs = [
-          p for p in players if p["team"] == und and p["position"] == "QB"
+          p
+          for p in players
+          if p["team"] == und and p["position"] == "QB" and p["salary"] >= 8500
       ]
       if und_wrs:
         prob += pulp.lpSum(cpt[p["pulp_id"]] for p in und_wrs) == 1
@@ -315,7 +352,7 @@ class DraftKingsOptimizer:
                 <= 1 - cpt[p["pulp_id"]]
             )
 
-    else:
+    else:  # balanced
       if len(teams) >= 2:
         prob += (
             pulp.lpSum(
@@ -442,11 +479,6 @@ class DraftKingsOptimizer:
       primary_stack_team: str = "ANY",
       **kwargs,
   ):
-    """DraftKings Classic Slate: 9 Roster Spots ($50,000 Cap)
-
-    - Allows dual-TE dynamically when an elite TE is rostered (hurdle logic)
-    - Safe Windows identifiers and solver configurations
-    """
     valid_pos = ["QB", "RB", "WR", "TE", "DST"]
     df_classic = self.df[self.df["position"].isin(valid_pos)].copy()
     df_classic = df_classic.drop_duplicates(subset=["pulp_id"]).copy()
@@ -499,17 +531,14 @@ class DraftKingsOptimizer:
         for p in players
     }
 
-    # 1. Salary Cap & Total Roster Count
     prob += (
         pulp.lpSum(p["salary"] * x[p["pulp_id"]] for p in players) <= salary_cap
     )
     prob += pulp.lpSum(x[p["pulp_id"]] for p in players) == 9
 
-    # 2. Positional Constraints
     prob += pulp.lpSum(x[p["pulp_id"]] for p in qbs) == 1
     prob += pulp.lpSum(x[p["pulp_id"]] for p in dsts) == 1
 
-    # Optional Team Stack Lock
     if primary_stack_team and primary_stack_team != "ANY":
       team_qbs = [p["pulp_id"] for p in qbs if p["team"] == primary_stack_team]
       if team_qbs:
@@ -521,7 +550,6 @@ class DraftKingsOptimizer:
     prob += pulp.lpSum(x[p["pulp_id"]] for p in wrs) <= 4
     prob += pulp.lpSum(x[p["pulp_id"]] for p in tes) >= 1
 
-    # Dual-TE Hurdle Model: Allow 2nd TE into FLEX only if an elite TE is present
     if contest_type in ["milly_maker", "limited_entry"]:
       elite_tes = [
           p["pulp_id"]
@@ -541,7 +569,6 @@ class DraftKingsOptimizer:
     all_skill_ids = [p["pulp_id"] for p in (rbs + wrs + tes)]
     prob += pulp.lpSum(x[pid] for pid in all_skill_ids) == 7
 
-    # 3. DraftKings Team Diversity: Max 8 players from any single team
     teams = set(
         p["team"] for p in players if p.get("team") and p["team"] != "UNK"
     )
@@ -550,7 +577,6 @@ class DraftKingsOptimizer:
       if len(team_pids) > 8:
         prob += pulp.lpSum(x[pid] for pid in team_pids) <= 8
 
-    # 4. User-Selected Stacking Architecture
     for qb in qbs:
       qb_team = qb["team"]
       opp_team = qb.get("opponent", "UNK")
@@ -601,7 +627,6 @@ class DraftKingsOptimizer:
           for pid in teammates:
             prob += x[pid] + x[qb["pulp_id"]] <= 1
 
-    # 5. User Locks
     for p in players:
       if p["name"] in self.locks:
         prob += x[p["pulp_id"]] == 1
